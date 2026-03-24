@@ -12,47 +12,111 @@ import nodemailer from 'nodemailer';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const JWT_SECRET = process.env.JWT_SECRET || 'rawverdict-secret-key-2024';
 
+// Global crash handlers
+process.on('uncaughtException', (err) => {
+  console.error('❌ Uncaught Exception:', err);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
 // Email Transporter Configuration
 let transporter: nodemailer.Transporter | null = null;
+let smtpError: string | null = null;
 
 async function initEmail() {
-  if (process.env.SMTP_USER && process.env.SMTP_PASS) {
-    transporter = nodemailer.createTransport({
-      host: process.env.SMTP_HOST || 'smtp.gmail.com',
-      port: parseInt(process.env.SMTP_PORT || '587'),
+  const user = process.env.SMTP_USER;
+  const pass = process.env.SMTP_PASS;
+  const host = process.env.SMTP_HOST || 'smtp.gmail.com';
+  const port = parseInt(process.env.SMTP_PORT || '587');
+  const fromName = process.env.SMTP_FROM_NAME || 'RawVerdict Support';
+  const fromEmail = process.env.SMTP_FROM || user || 'noreply@rawverdict.app';
+  const from = `"${fromName}" <${fromEmail}>`;
+
+  console.log(`📧 Initializing Email: User=${user || 'MISSING'}, Host=${host}, Port=${port}, From=${from}`);
+  smtpError = null;
+
+  if (user && pass) {
+    const config: any = {
+      host,
+      port,
       secure: process.env.SMTP_SECURE === 'true',
       auth: {
-        user: process.env.SMTP_USER,
-        pass: process.env.SMTP_PASS,
+        user: user,
+        pass: pass,
       },
-    });
+    };
+
+    // Special handling for Gmail to be more robust
+    if (host.includes('gmail.com')) {
+      console.log('💡 Using Gmail service configuration');
+      delete config.host;
+      delete config.port;
+      delete config.secure;
+      config.service = 'gmail';
+    }
+
+    transporter = nodemailer.createTransport(config);
     
-    transporter.verify((error, success) => {
+    transporter.verify((error: any, success: any) => {
       if (error) {
-        console.error('SMTP Verification Error:', error);
-        transporter = null; // Fallback to null if verification fails
+        console.error('❌ SMTP Verification Error:', error);
+        smtpError = error.message || String(error);
+        console.log('Note: For Gmail, you MUST use an "App Password" if 2FA is enabled.');
+        createEtherealTransporter();
       } else {
-        console.log('SMTP Server is ready to take our messages');
+        console.log('✅ SMTP Server is ready');
+        smtpError = null;
       }
     });
   } else {
-    try {
-      console.log('No SMTP credentials found. Attempting to create Ethereal test account...');
-      const testAccount = await nodemailer.createTestAccount();
-      transporter = nodemailer.createTransport({
-        host: testAccount.smtp.host,
-        port: testAccount.smtp.port,
-        secure: testAccount.smtp.secure,
-        auth: {
-          user: testAccount.user,
-          pass: testAccount.pass,
-        },
-      });
-      console.log('✅ Ethereal Email test account created. Emails will be available via preview URLs.');
-    } catch (err) {
-      console.warn('⚠️ Failed to create Ethereal test account. Emails will only be logged to console.', err);
-    }
+    console.warn('⚠️ No SMTP credentials found (SMTP_USER/SMTP_PASS). Using Ethereal Email for preview.');
+    smtpError = 'Missing credentials (SMTP_USER/SMTP_PASS)';
+    console.log('💡 To enable real emails, set SMTP_USER and SMTP_PASS in the AI Studio Settings menu.');
+    createEtherealTransporter();
   }
+}
+
+async function createEtherealTransporter() {
+  try {
+    console.log('🛠️ Creating Ethereal Test Account...');
+    const testAccount = await nodemailer.createTestAccount();
+    console.log(`✅ Ethereal Account Created: ${testAccount.user}`);
+    
+    transporter = nodemailer.createTransport({
+      host: 'smtp.ethereal.email',
+      port: 587,
+      secure: false,
+      auth: {
+        user: testAccount.user,
+        pass: testAccount.pass,
+      },
+    });
+    
+    // Add a helper to check if it's ethereal
+    (transporter as any).isEthereal = true;
+  } catch (error) {
+    console.error('❌ Failed to create Ethereal account:', error);
+    createMockTransporter();
+  }
+}
+
+function createMockTransporter() {
+  console.log('🛠️ Creating Mock Logger Transporter (Emails will be logged to console)');
+  transporter = {
+    sendMail: async (mailOptions: any) => {
+      console.log('-----------------------------------------');
+      console.log('📧 MOCK EMAIL SENT');
+      console.log(`From: ${mailOptions.from}`);
+      console.log(`To: ${mailOptions.to}`);
+      console.log(`Subject: ${mailOptions.subject}`);
+      console.log('Body (HTML):');
+      console.log(mailOptions.html);
+      console.log('-----------------------------------------');
+      return { messageId: 'mock-id-' + Date.now() };
+    }
+  } as any;
 }
 
 // Initialize Database
@@ -153,17 +217,21 @@ const authenticateToken = (req: any, res: any, next: any) => {
 };
 
 const isAdmin = (req: any, res: any, next: any) => {
+  console.log(`🛡️ isAdmin check for user: ${req.user?.username}, role: ${req.user?.role}`);
   if (req.user && req.user.role === 'admin') {
     next();
   } else {
+    console.warn(`🚫 Admin access denied for user: ${req.user?.username}`);
     res.status(403).json({ error: 'Admin access required' });
   }
 };
 
 async function startServer() {
-  await initEmail();
-  const app = express();
-  const PORT = Number(process.env.PORT) || 3000;
+  console.log('🚀 Starting server...');
+  try {
+    await initEmail();
+    const app = express();
+    const PORT = 3000; // Hardcoded to 3000 as per platform guidelines
 
   app.use(express.json({ limit: '50mb' }));
 
@@ -236,9 +304,14 @@ async function startServer() {
     }
   });
 
+  app.get('/api/test', (req, res) => {
+    res.json({ message: 'API is working' });
+  });
+
   app.post('/api/auth/reset-request', async (req, res) => {
+    console.log('POST /api/auth/reset-request received', req.body);
     try {
-      const { email } = req.body;
+      const { email, targetEmail } = req.body;
       const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email) as any;
       
       if (user) {
@@ -254,13 +327,21 @@ async function startServer() {
         const normalizedBaseUrl = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl;
         const resetLink = `${normalizedBaseUrl}/?token=${resetToken}`;
 
+        const recipient = targetEmail || email;
+        const fromName = process.env.SMTP_FROM_NAME || 'RawVerdict Support';
+        const fromEmail = process.env.SMTP_FROM || process.env.SMTP_USER || 'rawverdictsupport@gmail.com';
+        const fromAddress = `"${fromName}" <${fromEmail}>`;
+
         // Send email
         if (transporter) {
-          console.log(`Attempting to send reset email to ${email}...`);
+          const isEthereal = (transporter as any).isEthereal;
+          const isMock = !isEthereal && transporter.sendMail.toString().includes('MOCK EMAIL SENT');
+          console.log(`📧 Sending reset email (${isEthereal ? 'ETHEREAL' : isMock ? 'MOCK' : 'REAL'}): From=${fromAddress}, To=${recipient}`);
+          
           try {
             const info = await transporter.sendMail({
-              from: process.env.SMTP_FROM || `"RawVerdict Support" <rawverdictsupport@gmail.com>`,
-              to: email,
+              from: fromAddress,
+              to: recipient,
               subject: 'Password Reset Request',
               html: `
                 <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 12px;">
@@ -278,34 +359,33 @@ async function startServer() {
               `
             });
             
-            console.log(`✅ Reset email successfully sent to ${email}`);
+            console.log(`✅ Reset email successfully sent to ${recipient}`);
             
-            const previewUrl = nodemailer.getTestMessageUrl(info);
-            if (previewUrl) {
+            if (isEthereal) {
+              const previewUrl = nodemailer.getTestMessageUrl(info);
               console.log(`🔗 Ethereal Preview URL: ${previewUrl}`);
               return res.json({ 
-                message: "Test email sent! Click the link below to view it.",
-                previewUrl: previewUrl
+                message: "Email service not configured. A preview of the email has been generated.",
+                previewUrl: previewUrl,
+                debugLink: resetLink 
               });
             }
 
-            return res.json({ message: "If an account exists with that email, a reset link has been sent." });
+            if (isMock) {
+              return res.json({ 
+                message: "Email service not configured. Reset link logged to console.",
+                debugLink: resetLink 
+              });
+            }
+            
+            return res.json({ message: `Password reset link has been sent to ${recipient}.` });
           } catch (emailError) {
             console.error('❌ Failed to send email:', emailError);
-            // Return link for dev/testing if email fails
             return res.json({ 
-              message: "Failed to send email (check server logs). For testing purposes, here is the link:",
+              message: "Failed to send email, but here is your reset link (debug mode):",
               debugLink: resetLink 
             });
           }
-        } else {
-            console.log('⚠️ No email transporter available. Skipping real email send.');
-            console.log(`🔗 Reset Link for ${email}: ${resetLink}`);
-            // Return link for dev/testing if no SMTP config
-            return res.json({ 
-              message: "Email service not configured. For testing purposes, here is the link:",
-              debugLink: resetLink 
-            });
         }
       }
 
@@ -360,7 +440,88 @@ async function startServer() {
     }
   });
 
-  // Admin Routes
+  app.get('/api/admin/smtp-status', authenticateToken, isAdmin, (req, res) => {
+    if (!transporter) {
+      return res.json({ mode: 'none', status: 'Not Initialized' });
+    }
+    const isEthereal = (transporter as any).isEthereal;
+    const isMock = !isEthereal && transporter.sendMail.toString().includes('MOCK EMAIL SENT');
+    res.json({ 
+      mode: isEthereal ? 'ethereal' : isMock ? 'mock' : 'real',
+      status: isEthereal ? 'Ethereal (Preview)' : isMock ? 'Mock (Console Only)' : 'Real SMTP',
+      user: process.env.SMTP_USER || 'None',
+      host: process.env.SMTP_HOST || 'smtp.gmail.com',
+      error: smtpError
+    });
+  });
+
+  app.post('/api/admin/test-email', authenticateToken, isAdmin, async (req: any, res) => {
+    try {
+      console.log('📬 POST /api/admin/test-email called');
+      const { to } = req.body;
+      const recipient = to || req.user.email;
+      const fromName = process.env.SMTP_FROM_NAME || 'RawVerdict Support';
+      const fromEmail = process.env.SMTP_FROM || process.env.SMTP_USER || 'noreply@rawverdict.app';
+      const fromAddress = `"${fromName}" <${fromEmail}>`;
+
+      console.log(`📧 Admin Test Email: From=${fromAddress}, To=${recipient} (Requested by ${req.user.username})`);
+
+      if (!transporter) {
+        console.error('❌ Transporter is null in test-email route');
+        return res.status(400).json({ 
+          error: "Email transporter not initialized.",
+          details: "The server failed to connect to the SMTP server. Please check your SMTP_USER and SMTP_PASS in the Settings menu. If using Gmail, ensure you are using an 'App Password'."
+        });
+      }
+
+      const isEthereal = (transporter as any).isEthereal;
+      const isMock = !isEthereal && transporter.sendMail.toString().includes('MOCK EMAIL SENT');
+
+      const info = await transporter.sendMail({
+        from: fromAddress,
+        to: recipient,
+        subject: 'RawVerdict SMTP Test Email',
+        html: `
+          <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 12px;">
+            <h2 style="color: #4f46e5;">SMTP Connection Test</h2>
+            <p>Hello <strong>${req.user.username}</strong>,</p>
+            <p>This is a test email sent from your RawVerdict application to verify that your SMTP settings are correctly configured.</p>
+            <div style="background-color: #f8fafc; border-radius: 8px; padding: 15px; margin: 20px 0; border: 1px solid #e2e8f0;">
+              <p style="margin: 0; color: #475569; font-size: 14px;"><strong>Status:</strong> Success</p>
+              <p style="margin: 5px 0 0 0; color: #475569; font-size: 14px;"><strong>Mode:</strong> ${isEthereal ? 'Ethereal (Preview)' : isMock ? 'Mock (Console Only)' : 'Real SMTP'}</p>
+              <p style="margin: 5px 0 0 0; color: #475569; font-size: 14px;"><strong>Timestamp:</strong> ${new Date().toLocaleString()}</p>
+            </div>
+            <p style="color: #64748b; font-size: 14px;">If you received this, your email configuration is working correctly!</p>
+            <hr style="border: 0; border-top: 1px solid #e2e8f0; margin: 20px 0;" />
+            <p style="color: #94a3b8; font-size: 12px; text-align: center;">RawVerdict Card Collection Manager</p>
+          </div>
+        `
+      });
+
+      console.log('✅ Test email sendMail result:', {
+        messageId: info.messageId,
+        response: info.response,
+        accepted: info.accepted,
+        rejected: info.rejected,
+        envelope: info.envelope
+      });
+
+      let previewUrl = null;
+      if (isEthereal) {
+        previewUrl = nodemailer.getTestMessageUrl(info);
+      }
+
+      res.json({ 
+        message: `Test email sent successfully to ${recipient}`,
+        mode: isEthereal ? 'ethereal' : isMock ? 'mock' : 'real',
+        previewUrl
+      });
+    } catch (error) {
+      console.error('❌ Test email failed:', error);
+      res.status(500).json({ error: (error as Error).message });
+    }
+  });
+
   app.get('/api/admin/users', authenticateToken, isAdmin, (req, res) => {
     try {
       console.log('GET /api/admin/users called by', (req as any).user.username);
@@ -627,10 +788,25 @@ async function startServer() {
       }
   });
 
+  // API 404 handler
+  app.use('/api/*', (req, res) => {
+    res.status(404).json({ error: `API route not found: ${req.originalUrl}` });
+  });
+
+  // Global error handler
+  app.use((err: any, req: any, res: any, next: any) => {
+    console.error('Unhandled Server Error:', err);
+    res.status(500).json({ error: 'Internal server error', details: err.message });
+  });
+
   // Vite middleware
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: { 
+        middlewareMode: true,
+        hmr: false,
+        watch: null
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);
@@ -642,8 +818,12 @@ async function startServer() {
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+    console.log(`✅ Server is fully started and listening on http://0.0.0.0:${PORT}`);
   });
+} catch (error) {
+  console.error('❌ Failed to start server:', error);
+  process.exit(1);
+}
 }
 
 startServer();

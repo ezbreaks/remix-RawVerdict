@@ -60,7 +60,20 @@ export function Auth({ onLogin }: AuthProps) {
         body: JSON.stringify(body)
       });
 
-      const data = await res.json();
+      let data;
+      const contentType = res.headers.get('content-type');
+      if (contentType && contentType.includes('application/json')) {
+        data = await res.json();
+      } else {
+        const text = await res.text();
+        console.error('Server returned non-JSON response:', text);
+        
+        if (text.includes('Please wait while your application starts')) {
+          throw new Error('Server is still starting up. Please wait a few seconds and try again.');
+        }
+        
+        throw new Error(`Server error (${res.status}). Please check console.`);
+      }
 
       if (!res.ok) {
         throw new Error(data.error || 'Something went wrong');

@@ -26,33 +26,41 @@ async function sendReset() {
 
   // Email Transporter Configuration
   let transporter;
-  if (process.env.SMTP_USER && process.env.SMTP_PASS) {
-    transporter = nodemailer.createTransport({
-      host: process.env.SMTP_HOST || 'smtp.gmail.com',
-      port: parseInt(process.env.SMTP_PORT || '587'),
+  const user_smtp = process.env.SMTP_USER;
+  const pass_smtp = process.env.SMTP_PASS;
+  const host_smtp = process.env.SMTP_HOST || 'smtp.gmail.com';
+  const port_smtp = parseInt(process.env.SMTP_PORT || '587');
+
+  if (user_smtp && pass_smtp) {
+    const config: any = {
+      host: host_smtp,
+      port: port_smtp,
       secure: process.env.SMTP_SECURE === 'true',
       auth: {
-        user: process.env.SMTP_USER,
-        pass: process.env.SMTP_PASS,
+        user: user_smtp,
+        pass: pass_smtp,
       },
-    });
+    };
+
+    if (host_smtp.includes('gmail.com')) {
+      console.log('💡 Using Gmail service configuration');
+      delete config.host;
+      delete config.port;
+      delete config.secure;
+      config.service = 'gmail';
+    }
+
+    transporter = nodemailer.createTransport(config);
   } else {
-    console.log('No SMTP credentials found. Using Ethereal test account...');
-    const testAccount = await nodemailer.createTestAccount();
-    transporter = nodemailer.createTransport({
-      host: testAccount.smtp.host,
-      port: testAccount.smtp.port,
-      secure: testAccount.smtp.secure,
-      auth: {
-        user: testAccount.user,
-        pass: testAccount.pass,
-      },
-    });
+    console.error('❌ No SMTP credentials found in environment variables (SMTP_USER, SMTP_PASS).');
+    console.log('Please configure your Gmail secrets in the AI Studio Settings.');
+    db.close();
+    return;
   }
 
   try {
     const info = await transporter.sendMail({
-      from: process.env.SMTP_FROM || `"RawVerdict Support" <rawverdictsupport@gmail.com>`,
+      from: process.env.SMTP_FROM || 'rawverdictsupport@gmail.com',
       to: email,
       subject: 'Password Reset Request',
       html: `
@@ -72,10 +80,6 @@ async function sendReset() {
     });
     
     console.log('Email sent: ' + info.response);
-    const previewUrl = nodemailer.getTestMessageUrl(info);
-    if (previewUrl) {
-      console.log('Preview URL: ' + previewUrl);
-    }
     console.log('Direct Reset Link: ' + resetLink);
   } catch (error) {
     console.error('Error sending email:', error);

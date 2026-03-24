@@ -36,6 +36,7 @@ export function AdminDashboard({ onClose, currentUser }: AdminDashboardProps) {
     username: string;
   }>({ isOpen: false, userId: null, username: '' });
   const [adminSetPasswordValue, setAdminSetPasswordValue] = useState('');
+  const [smtpStatus, setSmtpStatus] = useState<{ mode: string; status: string; user: string; host: string; error?: string } | null>(null);
 
   const showToast = (message: string, type: 'success' | 'error') => {
     setToast({ message, type });
@@ -52,7 +53,23 @@ export function AdminDashboard({ onClose, currentUser }: AdminDashboardProps) {
 
   useEffect(() => {
     fetchUsers();
+    fetchSmtpStatus();
   }, []);
+
+  const fetchSmtpStatus = async () => {
+    const token = localStorage.getItem('rawverdict_token') || sessionStorage.getItem('rawverdict_token');
+    try {
+      const res = await fetch('/api/admin/smtp-status', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setSmtpStatus(data);
+      }
+    } catch (error) {
+      console.error("Failed to fetch SMTP status", error);
+    }
+  };
 
   const fetchUsers = async () => {
     const token = localStorage.getItem('rawverdict_token') || sessionStorage.getItem('rawverdict_token');
@@ -207,8 +224,8 @@ export function AdminDashboard({ onClose, currentUser }: AdminDashboardProps) {
     });
   };
 
-  const handleResetPassword = async (email: string, id: number) => {
-    console.log('Attempting to reset password for:', email);
+  const handleResetPassword = async (email: string, id: number, targetEmail?: string) => {
+    console.log('Attempting to reset password for:', email, targetEmail ? `(sending to ${targetEmail})` : '');
     setActionLoading(`reset-${id}`);
     setConfirmModal(null);
 
@@ -216,19 +233,59 @@ export function AdminDashboard({ onClose, currentUser }: AdminDashboardProps) {
       const res = await fetch('/api/auth/reset-request', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email })
+        body: JSON.stringify({ email, targetEmail })
       });
+
+      const contentType = res.headers.get('content-type');
+      const isJson = contentType && contentType.includes('application/json');
+
       if (res.ok) {
-        console.log('Reset request sent successfully');
-        showToast("Password reset email sent", 'success');
-      } else {
+        if (!isJson) {
+          const text = await res.text();
+          console.error('Server returned 200 OK but non-JSON response:', text);
+          
+          if (text.includes('Please wait while your application starts')) {
+            showToast("Server is still starting up. Please wait a few seconds and try again.", 'error');
+          } else {
+            showToast("Server error: Expected JSON but received HTML", 'error');
+          }
+          return;
+        }
         const data = await res.json();
-        console.error('Failed to trigger reset:', data);
-        showToast(data.error || "Failed to trigger reset", 'error');
+        console.log('Reset request sent successfully');
+        
+        if (data.previewUrl || data.debugLink) {
+          setConfirmModal({
+            isOpen: true,
+            title: 'Password Reset Link',
+            message: data.message || 'The reset link is ready. Since real email might not be configured, you can use the link below:',
+            type: 'info',
+            onConfirm: () => {
+              if (data.previewUrl) window.open(data.previewUrl, '_blank');
+              else if (data.debugLink) window.location.href = data.debugLink;
+              setConfirmModal(null);
+            }
+          });
+        } else {
+          showToast("Password reset email sent", 'success');
+        }
+      } else {
+        const text = await res.text();
+        console.error('Failed to trigger reset. Status:', res.status, 'Body:', text);
+        try {
+          const data = JSON.parse(text);
+          showToast(data.error || "Failed to trigger reset", 'error');
+        } catch (e) {
+          showToast(`Server error (${res.status}). Please check console.`, 'error');
+        }
       }
     } catch (error) {
       console.error("Failed to trigger reset (network error):", error);
-      showToast("Network error while triggering reset", 'error');
+      if (error instanceof Error && error.message.includes('Unexpected token')) {
+        showToast("Server returned invalid response. Check console.", 'error');
+      } else {
+        showToast("Network error while triggering reset", 'error');
+      }
     } finally {
       setActionLoading(null);
     }
@@ -267,6 +324,61 @@ export function AdminDashboard({ onClose, currentUser }: AdminDashboardProps) {
     }
   };
 
+  const handleTestEmail = async () => {
+    console.log('Attempting to send test email');
+    setActionLoading('test-email');
+    const token = localStorage.getItem('rawverdict_token') || sessionStorage.getItem('rawverdict_token');
+    
+    try {
+      const res = await fetch('/api/admin/test-email', {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}` 
+        },
+        body: JSON.stringify({ to: currentUser.email })
+      });
+
+      const data = await res.json();
+      
+      if (res.ok) {
+        if (data.previewUrl) {
+          setConfirmModal({
+            isOpen: true,
+            title: 'Test Email Sent (Preview)',
+            message: `SMTP is in preview mode. You can view the test email here:`,
+            type: 'info',
+            onConfirm: () => {
+              window.open(data.previewUrl, '_blank');
+              setConfirmModal(null);
+            }
+          });
+        } else if (data.mode === 'mock') {
+          setConfirmModal({
+            isOpen: true,
+            title: 'Mock Email Logged',
+            message: `SMTP credentials are missing, so the email was logged to the server console instead of being sent. Check the server logs to see the content.`,
+            type: 'warning',
+            onConfirm: () => setConfirmModal(null)
+          });
+        } else {
+          showToast(`Test email sent to ${currentUser.email} (Real SMTP)`, 'success');
+        }
+        // Refresh SMTP status to reflect any changes
+        fetchSmtpStatus();
+      } else {
+        // Display detailed error if available
+        const errorMessage = data.details ? `${data.error} ${data.details}` : (data.error || "Failed to send test email");
+        showToast(errorMessage, 'error');
+      }
+    } catch (error) {
+      console.error("Failed to send test email", error);
+      showToast("Network error while sending test email", 'error');
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
   const filteredUsers = users.filter(u => 
     u.username.toLowerCase().includes(search.toLowerCase()) || 
     u.email.toLowerCase().includes(search.toLowerCase())
@@ -294,6 +406,45 @@ export function AdminDashboard({ onClose, currentUser }: AdminDashboardProps) {
             </div>
           </div>
           <div className="flex items-center gap-2">
+            {smtpStatus && (
+              <div className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[10px] font-bold uppercase tracking-wider border ${
+                smtpStatus.mode === 'real' 
+                  ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' 
+                  : smtpStatus.mode === 'ethereal'
+                  ? 'bg-amber-500/10 text-amber-400 border-amber-500/20'
+                  : 'bg-slate-500/10 text-slate-400 border-slate-500/20'
+              }`}>
+                <div className={`w-1.5 h-1.5 rounded-full ${
+                  smtpStatus.mode === 'real' ? 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.5)]' : 
+                  smtpStatus.mode === 'ethereal' ? 'bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.5)]' : 
+                  'bg-slate-400'
+                }`} />
+                {smtpStatus.status}
+                {smtpStatus.error && (
+                  <div className="ml-2 p-1 text-red-400 hover:text-red-300 cursor-help" title={smtpStatus.error}>
+                    <ShieldAlert className="w-3 h-3" />
+                  </div>
+                )}
+                <button 
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    fetchSmtpStatus();
+                  }}
+                  className="ml-1 p-0.5 hover:bg-white/10 rounded-md transition-colors"
+                  title="Refresh SMTP Status"
+                >
+                  <Clock className="w-3 h-3" />
+                </button>
+              </div>
+            )}
+            <button 
+              onClick={handleTestEmail}
+              disabled={actionLoading === 'test-email'}
+              className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-sm font-bold flex items-center gap-2 transition-all border border-white/5"
+            >
+              {actionLoading === 'test-email' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Mail className="w-4 h-4" />}
+              Test Email
+            </button>
             <button 
               onClick={() => setShowAddForm(!showAddForm)}
               className={`px-4 py-2 rounded-xl text-sm font-bold flex items-center gap-2 transition-all ${showAddForm ? 'bg-slate-800 text-slate-300 hover:bg-slate-700' : 'bg-indigo-500 text-white hover:bg-indigo-600 shadow-lg shadow-indigo-500/20'}`}
@@ -409,14 +560,23 @@ export function AdminDashboard({ onClose, currentUser }: AdminDashboardProps) {
                             </div>
                         </div>
                     </div>
-                    <button
-                        onClick={() => handleResetPassword(adminInList.email, adminInList.id)}
-                        disabled={actionLoading === `reset-${adminInList.id}`}
-                        className="px-3 py-1.5 bg-indigo-500/20 hover:bg-indigo-500/30 text-indigo-300 rounded-lg text-xs font-medium transition-colors flex items-center gap-2 whitespace-nowrap"
-                    >
-                        {actionLoading === `reset-${adminInList.id}` ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <KeyRound className="w-3.5 h-3.5" />}
-                        Reset My Password
-                    </button>
+                    <div className="flex gap-2">
+                        <button
+                            onClick={() => setPasswordModal({ isOpen: true, userId: adminInList.id, username: adminInList.username })}
+                            className="px-3 py-1.5 bg-indigo-500/20 hover:bg-indigo-500/30 text-indigo-300 rounded-lg text-xs font-medium transition-colors flex items-center gap-2 whitespace-nowrap"
+                        >
+                            <KeyRound className="w-3.5 h-3.5" />
+                            Set Password
+                        </button>
+                        <button
+                            onClick={() => confirmResetPassword(adminInList.email, adminInList.id)}
+                            disabled={actionLoading === `reset-${adminInList.id}`}
+                            className="px-3 py-1.5 bg-white/5 hover:bg-white/10 text-slate-300 rounded-lg text-xs font-medium transition-colors flex items-center gap-2 whitespace-nowrap border border-white/5"
+                        >
+                            {actionLoading === `reset-${adminInList.id}` ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Mail className="w-3.5 h-3.5" />}
+                            Email Reset
+                        </button>
+                    </div>
                 </div>
             </div>
         )}
@@ -491,7 +651,7 @@ export function AdminDashboard({ onClose, currentUser }: AdminDashboardProps) {
 
                   <div className="flex items-center gap-2 self-end sm:self-center">
                     <button 
-                      onClick={() => handleResetPassword(u.email, u.id)}
+                      onClick={() => confirmResetPassword(u.email, u.id)}
                       disabled={actionLoading === `reset-${u.id}`}
                       className="p-2 text-slate-400 hover:text-amber-400 hover:bg-amber-500/10 rounded-lg transition-all flex items-center gap-2 text-xs font-medium"
                       title="Trigger Password Reset Email"
@@ -523,7 +683,7 @@ export function AdminDashboard({ onClose, currentUser }: AdminDashboardProps) {
 
                     {u.id !== currentUser.id && (
                       <button 
-                        onClick={() => handleDeleteUser(u.id)}
+                        onClick={() => confirmDeleteUser(u.id)}
                         disabled={deletingId === u.id}
                         className="p-2 text-slate-400 hover:text-red-400 hover:bg-red-500/10 rounded-lg transition-all flex items-center gap-2 text-xs font-medium"
                         title="Delete User Account"
@@ -595,6 +755,79 @@ export function AdminDashboard({ onClose, currentUser }: AdminDashboardProps) {
                 </div>
               </motion.div>
             </div>
+          )}
+        </AnimatePresence>
+
+        {/* Global Confirmation Modal */}
+        <AnimatePresence>
+          {confirmModal && confirmModal.isOpen && (
+            <div className="fixed inset-0 z-[400] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+              <motion.div 
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.95 }}
+                className="w-full max-w-md bg-slate-900 border border-white/10 rounded-2xl shadow-2xl overflow-hidden"
+              >
+                <div className="p-6">
+                  <div className="flex items-center gap-3 mb-4">
+                    <div className={`p-2 rounded-lg ${
+                      confirmModal.type === 'danger' ? 'bg-red-500/20 text-red-400' :
+                      confirmModal.type === 'warning' ? 'bg-amber-500/20 text-amber-400' :
+                      'bg-indigo-500/20 text-indigo-400'
+                    }`}>
+                      {confirmModal.type === 'danger' ? <ShieldAlert className="w-5 h-5" /> : 
+                       confirmModal.type === 'warning' ? <ShieldAlert className="w-5 h-5" /> : 
+                       <Mail className="w-5 h-5" />}
+                    </div>
+                    <h3 className="text-lg font-bold text-white">{confirmModal.title}</h3>
+                  </div>
+                  
+                  <p className="text-slate-400 text-sm mb-8 leading-relaxed">
+                    {confirmModal.message}
+                  </p>
+                  
+                  <div className="flex gap-3 justify-end">
+                    <button 
+                      onClick={() => setConfirmModal(null)}
+                      className="px-4 py-2 text-slate-400 hover:text-white hover:bg-white/5 rounded-xl text-sm font-medium transition-colors"
+                    >
+                      Cancel
+                    </button>
+                    <button 
+                      onClick={() => {
+                        confirmModal.onConfirm();
+                      }}
+                      className={`px-6 py-2 rounded-xl text-sm font-bold shadow-lg transition-all ${
+                        confirmModal.type === 'danger' ? 'bg-red-500 hover:bg-red-600 shadow-red-500/20' :
+                        confirmModal.type === 'warning' ? 'bg-amber-500 hover:bg-amber-600 shadow-amber-500/20' :
+                        'bg-indigo-500 hover:bg-indigo-600 shadow-indigo-500/20'
+                      } text-white`}
+                    >
+                      {confirmModal.type === 'info' && confirmModal.title.includes('Sent') ? 'View Email' : 'Confirm'}
+                    </button>
+                  </div>
+                </div>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
+
+        {/* Toast Notification */}
+        <AnimatePresence>
+          {toast && (
+            <motion.div 
+              initial={{ opacity: 0, y: 50 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 50 }}
+              className="fixed bottom-8 left-1/2 -translate-x-1/2 z-[500]"
+            >
+              <div className={`px-6 py-3 rounded-2xl shadow-2xl border flex items-center gap-3 ${
+                toast.type === 'success' ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400' : 'bg-red-500/10 border-red-500/20 text-red-400'
+              }`}>
+                {toast.type === 'success' ? <ShieldCheck className="w-5 h-5" /> : <ShieldAlert className="w-5 h-5" />}
+                <span className="text-sm font-bold">{toast.message}</span>
+              </div>
+            </motion.div>
           )}
         </AnimatePresence>
       </motion.div>
