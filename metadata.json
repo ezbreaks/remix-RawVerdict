@@ -1,0 +1,7 @@
+{
+  "name": "Remix: RawVerdict",
+  "description": "A trading card scanner and inventory manager powered by OptiCard AI.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
